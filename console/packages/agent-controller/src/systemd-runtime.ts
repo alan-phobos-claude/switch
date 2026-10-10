@@ -77,6 +77,7 @@ const RELEASED = 'released';
 /** Provider settings naming a path in the controller user's home, which an agent could not reach. */
 const PATH_VARIABLES = new Set([
   'CLAUDE_CONFIG_DIR',
+  'CLAUDE_SECURESTORAGE_CONFIG_DIR',
   'CODEX_HOME',
   'CLOUDSDK_CONFIG',
   'GOOGLE_APPLICATION_CREDENTIALS',

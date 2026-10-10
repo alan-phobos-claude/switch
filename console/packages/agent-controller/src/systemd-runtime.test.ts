@@ -118,6 +118,7 @@ beforeEach(() => {
   env = {
     ANTHROPIC_API_KEY: 'sk-placeholder',
     CLAUDE_CONFIG_DIR: '/home/controller/.claude',
+    CLAUDE_SECURESTORAGE_CONFIG_DIR: '/home/controller/.claude',
     UNRELATED: 'kept out',
   };
   runtime = makeRuntime();
