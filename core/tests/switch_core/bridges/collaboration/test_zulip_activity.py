@@ -735,7 +735,12 @@ async def test_start_reads_only_the_bridged_streams_and_stop_drops_the_queue(
 
     realm, bridge = registered[0], registered[1]
     assert realm["fetch_event_types"] == ["realm"]
-    assert bridge["event_types"] == ["message", "subscription", "reaction"]
+    assert bridge["event_types"] == [
+        "message",
+        "update_message",
+        "subscription",
+        "reaction",
+    ]
     assert "all_public_streams" not in bridge
     assert {"queue_id": "q2"} in fake.sent("DELETE", "events")
 
@@ -902,3 +907,132 @@ async def test_the_default_topic_in_other_case_is_still_the_top_level() -> None:
     await adapter._handle_message(stream_message(subject="Switch"), agent=None)
 
     assert rec.messages[0].root_id is None
+
+
+# ── Edits ────────────────────────────────────────────────────────────────────
+
+
+def _edit(**overrides: Any) -> dict[str, Any]:
+    return {
+        "type": "update_message",
+        "user_id": 5,
+        "message_id": 900,
+        "edit_timestamp": 1700000000,
+        "orig_content": "can someone look at this?",
+        "content": "@**Worker** can someone look at this?",
+        "rendering_only": False,
+        **overrides,
+    }
+
+
+def _edited_routes(**message: Any) -> dict[tuple[str, str], Route]:
+    routes = stream_routes()
+    fields = {"content": "@**Worker** can someone look at this?", **message}
+    routes[("GET", "messages/900")] = lambda p: {"message": stream_message(**fields)}
+    return routes
+
+
+async def test_an_edit_that_brings_an_agent_in_is_relayed_as_a_new_message() -> None:
+    adapter, rec = connected(FakeZulip(_edited_routes()))
+    add_bot(adapter, "worker", BOT_ID, "Worker")
+    await adapter._handle_message(
+        stream_message(content="can someone look at this?"), agent=None
+    )
+
+    await adapter._handle_event(_edit(), None)
+
+    original, edited = rec.messages
+    assert original.message_ref == "900"
+    assert edited.message_ref == "900~1700000000"
+    assert edited.content.endswith("_(edited)_")
+    assert adapter.translate_inbound(edited.content).startswith("@worker ")
+    assert edited.root_id is None and edited.channel_id == "7"
+
+
+async def test_an_edit_reference_leads_back_to_the_zulip_message() -> None:
+    fake = FakeZulip({("POST", "messages/900/reactions"): lambda p: {}})
+    adapter, _ = connected(fake)
+    add_bot(adapter, "worker", BOT_ID, "Worker")
+    adapter._message_topics[900] = (7, "bug 12")
+
+    await adapter.mark_activity(
+        "7", "900~1700000000", agent_name="worker", mark="working", on=True
+    )
+
+    assert fake.sent("POST", "messages/900/reactions") == [{"emoji_name": "eyes"}]
+    assert await adapter._topic_for(7, "900~1700000000") == "bug 12"
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        # Reworded, but the agent was already named.
+        _edit(orig_content="@**Worker** look", content="@**Worker** look please"),
+        # A correction naming nobody.
+        _edit(content="can someone look at this, please?"),
+        # Zulip re-rendering a link preview, not a person editing.
+        _edit(rendering_only=True),
+        # A topic move carries no content.
+        {k: v for k, v in _edit().items() if k not in ("content", "orig_content")},
+    ],
+)
+async def test_an_edit_that_brings_no_agent_in_is_not_relayed(
+    edit: dict[str, Any],
+) -> None:
+    fake = FakeZulip(_edited_routes())
+    adapter, rec = connected(fake)
+    add_bot(adapter, "worker", BOT_ID, "Worker")
+
+    await adapter._handle_event(edit, None)
+
+    assert rec.messages == []
+    assert fake.sent("GET", "messages/900") == []
+
+
+async def test_an_agent_named_in_plain_text_counts_as_brought_in() -> None:
+    adapter, rec = connected(FakeZulip(_edited_routes()))
+    add_bot(adapter, "worker", BOT_ID, "Worker")
+
+    await adapter._handle_event(_edit(content="@worker can someone look?"), None)
+
+    assert len(rec.messages) == 1
+
+
+async def test_one_edit_delivered_by_two_queues_is_relayed_once() -> None:
+    adapter, rec = connected(FakeZulip(_edited_routes()))
+    bot = add_bot(adapter, "worker", BOT_ID, "Worker")
+
+    await adapter._handle_event(_edit(), None)
+    await adapter._handle_event(_edit(), bot)
+    await adapter._handle_event(_edit(edit_timestamp=1700000100), None)
+
+    assert [m.message_ref for m in rec.messages] == [
+        "900~1700000000",
+        "900~1700000100",
+    ]
+
+
+async def test_an_edit_is_never_run_as_a_command_and_brings_no_files_again() -> None:
+    adapter, rec = connected(
+        FakeZulip(
+            _edited_routes(
+                content="!interrupt @**Worker** [a.txt](/user_uploads/2/ab/x/a.txt)"
+            )
+        )
+    )
+    add_bot(adapter, "worker", BOT_ID, "Worker")
+
+    await adapter._handle_event(_edit(content="!interrupt @**Worker**"), None)
+
+    [msg] = rec.messages
+    assert rec.commands == []
+    assert msg.attachments == [] and msg.attachment_failures == []
+
+
+async def test_an_edit_by_someone_other_than_the_sender_is_not_relayed() -> None:
+    adapter, rec = connected(FakeZulip(_edited_routes()))
+    add_bot(adapter, "worker", BOT_ID, "Worker")
+
+    await adapter._handle_event(_edit(user_id=99), None)
+
+    assert rec.messages == []

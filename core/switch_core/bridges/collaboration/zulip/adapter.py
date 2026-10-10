@@ -18,6 +18,10 @@ one for the bridge account (the streams it is subscribed to, which are the
 bridged ones, with subscription changes and reactions), and one per agent bot
 for the direct messages people send that bot.
 
+An edit is relayed only when it names an agent the message did not name
+before, and then as a message of its own marked as an edit: Switch keeps what
+was said rather than rewriting it.
+
 Session activity is drawn with the neutral renderer: a turn's status is one
 message edited in place, and a request is a card answered by typing its handle
 or by clicking one of the numbered reactions the agent's bot seeds on it (see
@@ -118,6 +122,15 @@ _USER_MENTION = re.compile(r"@_?\*\*([^*|]+?)(?:\|(\d+))?\*\*")
 # A person as Switch names them in an outbound body: `@` and their Zulip email,
 # which is the username this bridge reports for them.
 _EMAIL_MENTION = re.compile(r"@([\w.+-]+@[\w-]+(?:\.[\w-]+)+)")
+
+# An agent named in plain text, the way Switch itself writes `@agent-name`.
+_PLAIN_MENTION = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9._-]*)")
+
+# Separates a message id from the edit it stands for in a message reference:
+# an edit relayed into the room is a message of its own, so it needs a
+# reference of its own, and that reference still has to lead back to the
+# Zulip message for a reaction, a reply or a thread to land on.
+_EDIT_SEPARATOR = "~"
 
 # A Switch transport id in an outbound body (`@alice:server`).
 _TRANSPORT_MENTION = re.compile(r"@([\w.-]+):\S+")
@@ -333,7 +346,9 @@ class ZulipAdapter(PlatformAdapter):
         self._message_topics: OrderedDict[int, tuple[int, str]] = OrderedDict()
         # (stream id, topic) -> the id of the topic's first message.
         self._topic_roots: OrderedDict[tuple[int, str], int] = OrderedDict()
-        self._seen: OrderedDict[int, None] = OrderedDict()
+        # Message references already relayed: a message id, or for an edit the
+        # id and the edit it stands for.
+        self._seen: OrderedDict[str, None] = OrderedDict()
 
         # Published message id -> the reactions it offers as controls.
         self._offers: OrderedDict[int, Offer] = OrderedDict()
@@ -403,7 +418,14 @@ class ZulipAdapter(PlatformAdapter):
                 # Only the streams the bridge account is subscribed to: a
                 # message from any other would be bridged on arrival, so
                 # reading every public stream would adopt all of them.
-                {"event_types": ["message", "subscription", "reaction"]},
+                {
+                    "event_types": [
+                        "message",
+                        "update_message",
+                        "subscription",
+                        "reaction",
+                    ]
+                },
                 agent=None,
             ),
             name="zulip-bridge-events",
@@ -633,7 +655,7 @@ class ZulipAdapter(PlatformAdapter):
         """The topic a post belongs in: the root message's, or the default."""
         if thread_root_id is None:
             return self._config.default_topic
-        root = int(thread_root_id)
+        root = _zulip_id(thread_root_id)
         known = self._message_topics.get(root)
         if known is not None:
             return known[1]
@@ -648,7 +670,7 @@ class ZulipAdapter(PlatformAdapter):
     async def update_message(
         self, channel_id: str, message_ref: str, new_content: str
     ) -> None:
-        message_id = int(message_ref)
+        message_id = _zulip_id(message_ref)
         try:
             client = await self._sender_of(channel_id, message_id)
             await client.call(
@@ -690,7 +712,7 @@ class ZulipAdapter(PlatformAdapter):
     async def delete_message(self, channel_id: str, message_ref: str) -> None:
         try:
             await self._reader(channel_id).call(
-                "DELETE", f"messages/{int(message_ref)}"
+                "DELETE", f"messages/{_zulip_id(message_ref)}"
             )
         except (ZulipError, httpx.HTTPError) as exc:
             logger.error("Failed to delete Zulip message %s: %s", message_ref, exc)
@@ -1254,8 +1276,8 @@ class ZulipAdapter(PlatformAdapter):
         raises: this is on the inbound path of every message.
         """
         try:
-            root = int(root_ref)
-            target = int(message_ref)
+            root = _zulip_id(root_ref)
+            target = _zulip_id(message_ref)
             if channel_id.startswith(_DM_PREFIX):
                 narrow = await self._narrow(channel_id, None)
             else:
@@ -1325,7 +1347,7 @@ class ZulipAdapter(PlatformAdapter):
             raise RuntimeError(f"no Zulip bot for {agent_name!r}")
         emoji = WORKING_EMOJI if mark == "working" else QUEUED_EMOJI
         try:
-            await self._react(bot, int(message_ref), emoji, on=on)
+            await self._react(bot, _zulip_id(message_ref), emoji, on=on)
         except ZulipError as exc:
             if exc.status in (400, 403) and exc.code != "RATE_LIMIT_HIT":
                 raise ActivityMarkRefused(str(exc)) from exc
@@ -1355,10 +1377,12 @@ class ZulipAdapter(PlatformAdapter):
             )
             return
         about = "About your reply in Switch"
-        if thread_ref is not None and thread_ref.isdigit():
+        if thread_ref is not None and _is_message_ref(thread_ref):
             link = await self.channel_deeplink(channel_id)
             if link:
-                about = f"About [this conversation]({link}/near/{thread_ref})"
+                about = (
+                    f"About [this conversation]({link}/near/{_zulip_id(thread_ref)})"
+                )
         body = f"{about}: {self.escape_label_for_body(text)}"
         try:
             await self._require_bridge().call(
@@ -1626,7 +1650,10 @@ class ZulipAdapter(PlatformAdapter):
             self._poll(
                 f"bot:{agent_name}",
                 bot.client,
-                {"event_types": ["message", "reaction"], "narrow": [["is", "dm"]]},
+                {
+                    "event_types": ["message", "update_message", "reaction"],
+                    "narrow": [["is", "dm"]],
+                },
                 agent=bot,
             ),
             name=f"zulip-bot-events-{agent_name}",
@@ -1884,9 +1911,75 @@ class ZulipAdapter(PlatformAdapter):
             await self._handle_subscription(event)
         elif kind == "reaction":
             await self._handle_reaction(event)
+        elif kind == "update_message":
+            await self._handle_edit(event, agent)
+
+    async def _handle_edit(
+        self, event: dict[str, Any], agent: _AgentBot | None
+    ) -> None:
+        """Relay an edit that names an agent the message did not name before.
+
+        Switch takes no edits — a room keeps what was said — so the edited
+        message goes in as a message of its own, marked as an edit, rather
+        than changing the one already there. Only an edit that brings an agent
+        in is relayed: a reworded or corrected message would otherwise be said
+        twice, and an agent already named would be asked twice. Zulip's own
+        edit window bounds how old a message can be brought back this way.
+        """
+        if event.get("rendering_only") or "content" not in event:
+            return
+        if "orig_content" not in event:
+            return
+        newly_named = self._agents_named(str(event["content"])) - self._agents_named(
+            str(event["orig_content"])
+        )
+        if not newly_named:
+            return
+        message_id = int(event["message_id"])
+        reader = agent.client if agent is not None else self._require_bridge()
+        try:
+            result = await reader.call(
+                "GET", f"messages/{message_id}", {"apply_markdown": False}
+            )
+        except (ZulipError, httpx.HTTPError) as exc:
+            logger.warning(
+                "Could not read edited Zulip message %s, so the edit naming %s "
+                "is not relayed: %s",
+                message_id,
+                ", ".join(sorted(newly_named)),
+                exc,
+            )
+            return
+        message = result["message"]
+        # Only a message's sender can change what it says.
+        if int(message.get("sender_id", 0)) != int(event.get("user_id") or 0):
+            return
+        edit = str(event.get("edit_timestamp") or int(time.time()))
+        await self._handle_message(message, agent, edit=edit)
+
+    def _agents_named(self, text: str) -> set[str]:
+        """The agents a message names, as Zulip mentions or as `@agent-name`."""
+        named: set[str] = set()
+        for match in _USER_MENTION.finditer(text):
+            name, user_id = match.group(1), match.group(2)
+            bot = (
+                self._bot_by_user_id.get(int(user_id))
+                if user_id is not None
+                else next((b for b in self._bots.values() if b.full_name == name), None)
+            )
+            if bot is not None:
+                named.add(bot.agent_name)
+        for match in _PLAIN_MENTION.finditer(text):
+            if match.group(1) in self._bots:
+                named.add(match.group(1))
+        return named
 
     async def _handle_message(
-        self, message: dict[str, Any], agent: _AgentBot | None
+        self,
+        message: dict[str, Any],
+        agent: _AgentBot | None,
+        *,
+        edit: str | None = None,
     ) -> None:
         sender_id = int(message["sender_id"])
         if sender_id == self._bridge_user_id or sender_id in self._bot_by_user_id:
@@ -1901,15 +1994,20 @@ class ZulipAdapter(PlatformAdapter):
             # one.
             return
         message_id = int(message["id"])
-        if message_id in self._seen:
+        message_ref = (
+            str(message_id) if edit is None else f"{message_id}{_EDIT_SEPARATOR}{edit}"
+        )
+        if message_ref in self._seen:
             return
-        _remember(self._seen, message_id, None, _SEEN_MAX)
+        _remember(self._seen, message_ref, None, _SEEN_MAX)
 
         sender_name = str(message.get("sender_email", sender_id))
         self._remember_person(
             sender_id, sender_name, str(message.get("sender_full_name", ""))
         )
         content = str(message.get("content", ""))
+        if edit is not None:
+            content = f"{content}\n_(edited)_"
         root_id: str | None = None
         channel_name: str | None = None
 
@@ -1931,7 +2029,8 @@ class ZulipAdapter(PlatformAdapter):
 
         agent_name = agent.agent_name if agent is not None else None
         stripped = content.strip()
-        if stripped.startswith("!"):
+        # An edit is never run as a command: a command is something done once.
+        if edit is None and stripped.startswith("!"):
             parts = stripped.split(None, 1)
             await _started(self._on_command)(
                 InboundCommand(
@@ -1950,7 +2049,10 @@ class ZulipAdapter(PlatformAdapter):
             return
 
         reader = agent.client if agent is not None else self._require_bridge()
-        attachments, failures = await self._fetch_attachments(content, reader)
+        # An edit's files went in with the message the first time.
+        attachments, failures = (
+            await self._fetch_attachments(content, reader) if edit is None else ([], [])
+        )
         await _started(self._on_message)(
             InboundMessage(
                 channel_id=channel_id,
@@ -1958,7 +2060,7 @@ class ZulipAdapter(PlatformAdapter):
                 sender_id=str(sender_id),
                 sender_name=sender_name,
                 content=content,
-                message_ref=str(message_id),
+                message_ref=message_ref,
                 root_id=root_id,
                 agent_name=agent_name,
                 channel_name=channel_name,
@@ -2097,6 +2199,15 @@ def _edit_window_closed(exc: ZulipError) -> bool:
     has passed. Zulip gives this refusal no code of its own, so it is read
     from the message."""
     return "time limit" in str(exc).lower()
+
+
+def _zulip_id(message_ref: str) -> int:
+    """The Zulip message a reference stands for, an edit's included."""
+    return int(message_ref.split(_EDIT_SEPARATOR, 1)[0])
+
+
+def _is_message_ref(message_ref: str) -> bool:
+    return message_ref.split(_EDIT_SEPARATOR, 1)[0].isdigit()
 
 
 def _link_text(filename: str) -> str:

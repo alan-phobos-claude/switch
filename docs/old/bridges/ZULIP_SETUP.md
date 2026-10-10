@@ -101,6 +101,17 @@ agent's current work, judged by the same rules as `!interrupt`.
 Clicks and answers from bots are ignored. When an answer cannot be taken, the
 person who gave it is told why in a direct message from the bridge account.
 
+## Edits
+
+Switch keeps what was said rather than rewriting it, so editing a message
+does not change it in the room. One edit is acted on: one that **names an
+agent the message did not name before**, such as adding `@**Agent Name**` to
+a question after posting it. That edit goes into the room as a message of its
+own, marked _(edited)_, and reaches the agent like any other. Rewording a
+message, or editing one that already named the agent, changes nothing in
+Switch. An edit is never run as a command, and its files are not sent again.
+Zulip's own edit window bounds how old a message can be brought in this way.
+
 ## Files
 
 Files people attach are downloaded and given to the agent, up to the
