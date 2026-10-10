@@ -14,6 +14,7 @@ const surface = z.enum([
   'discord',
   'teams',
   'telegram',
+  'zulip',
 ]);
 const origin = z.strictObject({
   surface,

@@ -655,13 +655,22 @@ class CollaborationBridgeLifecycleService:
         An edit can change what registration checked — which workspace the
         bridge claims, or the credentials proving it — so it is checked the
         same way before it is stored: valid for the type, no claim another
-        bridge holds, and credentials the platform accepts. Raises
-        `ValidationError`, `BridgeClaimConflict` or `BridgeCredentialError`.
+        bridge holds, URLs Switch may reach, and credentials the platform
+        accepts. Raises `ValidationError`, `BridgeClaimConflict`,
+        `BridgeStartRefused` or `BridgeCredentialError`.
+
+        The URLs are checked before the credentials, as at registration: the
+        credential check sends the secrets to whatever the config names, so a
+        server the outbound policy refuses must never be asked.
         """
         self.validate_connection_config(bridge_type, connection_config)
         await self.reject_claim_conflict(
             bridge_type, connection_config, exclude_bridge_id=bridge_id
         )
+        try:
+            await self.check_outbound_urls(bridge_type, connection_config)
+        except OutboundURLRefused as exc:
+            raise BridgeStartRefused(f"Bridge {bridge_id}: {exc}") from exc
         adapter_cls = self._adapter_registry.get(bridge_type)
         if adapter_cls is not None:
             await adapter_cls.verify_credentials(connection_config)

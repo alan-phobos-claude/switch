@@ -6,7 +6,11 @@ import { SWITCH_DOCS_MESSAGING_APPS_URL } from '@shared/urls';
 import { hasBridgeIcon } from './bridge-icon';
 import { bridgePlatformLabel, bridgeSetupDocsUrl } from './bridge-platform';
 
-/** Every bridge type switch-core registers today (`main.py` register_adapter). */
+/**
+ * Every bridge type switch-core registers today (`main.py` register_adapter)
+ * that has a published setup page and a bundled icon. Zulip is registered too,
+ * and has neither yet: it is named, and falls back to the index and no icon.
+ */
 const BRIDGE_TYPES = ['slack', 'mattermost', 'discord', 'teams', 'telegram'];
 
 const BRIDGE_ICON_DIR = join(
@@ -21,12 +25,13 @@ describe('bridgePlatformLabel', () => {
     expect(bridgePlatformLabel('discord')).toBe('Discord');
     expect(bridgePlatformLabel('teams')).toBe('Microsoft Teams');
     expect(bridgePlatformLabel('telegram')).toBe('Telegram');
+    expect(bridgePlatformLabel('zulip')).toBe('Zulip');
   });
 
   it('falls back to the raw key for a type this build does not know', () => {
     // A newer switch-core can register a bridge type this app has never heard
     // of. Showing the slug is wrong-looking but still identifies it.
-    expect(bridgePlatformLabel('zulip')).toBe('zulip');
+    expect(bridgePlatformLabel('irc')).toBe('irc');
   });
 
   it('has a generic word for an unbridged room', () => {

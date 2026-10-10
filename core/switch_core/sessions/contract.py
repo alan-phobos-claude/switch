@@ -61,6 +61,7 @@ Surface = Literal[
     "discord",
     "teams",
     "telegram",
+    "zulip",
 ]
 Provider = Annotated[str, StringConstraints(min_length=1)]
 

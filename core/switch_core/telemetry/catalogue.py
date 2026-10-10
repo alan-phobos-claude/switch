@@ -87,7 +87,7 @@ class TelemetryCatalogueError(Exception):
 # we could not resolve it" (e.g. the lookup itself failed) — so a transient
 # error is never misreported as an internal-only room.
 BRIDGE_PLATFORM = one_of(
-    "slack", "mattermost", "discord", "teams", "telegram", "none", "unknown"
+    "slack", "mattermost", "discord", "teams", "telegram", "zulip", "none", "unknown"
 )
 
 # `unknown` as for BRIDGE_PLATFORM: the room exists and the lookup that would

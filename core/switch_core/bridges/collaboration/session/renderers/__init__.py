@@ -130,6 +130,7 @@ SURFACES: dict[Surface, str] = {
     "discord": "Discord",
     "teams": "Teams",
     "telegram": "Telegram",
+    "zulip": "Zulip",
 }
 
 # An approval with nothing to choose from. The same defect as a form with no

@@ -14,6 +14,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   discord: 'Discord',
   teams: 'Microsoft Teams',
   telegram: 'Telegram',
+  zulip: 'Zulip',
 };
 
 /**

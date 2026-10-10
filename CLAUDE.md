@@ -22,7 +22,7 @@ history — a later commit cannot take it back. Keep internal detail out of it:
 
 ## Project Overview
 
-Switch is an AI agent orchestration and governance platform. It onboards, orchestrates, and secures third-party AI agents using a Postgres-backed message store as the internal message bus. Agents register via the Agent Bridge API and communicate through Switch rooms, with collaboration bridges to external platforms (Slack, Mattermost, Discord, Teams, Telegram).
+Switch is an AI agent orchestration and governance platform. It onboards, orchestrates, and secures third-party AI agents using a Postgres-backed message store as the internal message bus. Agents register via the Agent Bridge API and communicate through Switch rooms, with collaboration bridges to external platforms (Slack, Mattermost, Discord, Teams, Telegram, Zulip).
 
 The target architecture is documented in `docs/`.
 
@@ -80,7 +80,7 @@ just test -k "test_name"         # run specific test
 - `clients/` — room participants: `actor.py` (identity, membership, writes: `HumanActor`, `AgentActor`, `SystemActor`) and `consumer.py` (the delivery loop and hooks: `AgentConsumer`, `CommandConsumer`, `WorkspaceConsumer`)
 - `bridges/` — External integrations
   - `agent/` — Agent Bridge (HTTP API, MCP server, server-side connectors); `protocol/agent_core.py` is `AgentCore`, `protocol/agent_connections.py` holds each `AgentConnection`
-  - `collaboration/` — Collaboration Bridge: one `CollaborationCore` per workspace, driving a `PlatformAdapter` (Slack, Mattermost, Discord, Teams, Telegram)
+  - `collaboration/` — Collaboration Bridge: one `CollaborationCore` per workspace, driving a `PlatformAdapter` (Slack, Mattermost, Discord, Teams, Telegram, Zulip)
   - `resource/` — Resource Bridge (platform resource management)
 - `gateway/` — Management API for the frontend
 
@@ -187,7 +187,7 @@ Tests live in `core/tests/switch_core/` mirroring the module structure. Uses pyt
   event stream, room slots, failure handling). Authoritative where it and
   `ARCHITECTURE.md` overlap
 - `docs/old/bridges/` — collaboration bridge setup: `README.md` plus one page each
-  for Slack, Mattermost, Discord, Teams, and Telegram
+  for Slack, Mattermost, Discord, Teams, Telegram, and Zulip
 - `docs/old/GATEWAY_OIDC_SETUP.md` — configuring the gateway's bring-your-own
   OIDC browser sign-in (variables, redirect URI, WorkOS Connect setup)
 - `docs/old/LOCAL_DEVELOPMENT.md` — running Switch locally for development:

@@ -96,6 +96,10 @@ from switch_core.bridges.collaboration.telegram.app_client import (
     bot_resource,
 )
 from switch_core.bridges.collaboration.telegram.install import TelegramAppInstaller
+from switch_core.bridges.collaboration.zulip.adapter import (
+    ZulipAdapter,
+    ZulipConnectionConfig,
+)
 from switch_core.bridges.resource.service import ResourceService
 from switch_core.clients.actor import Actor, AgentActor, HumanActor, SystemActor
 from switch_core.clients.agent_consumer import AgentConsumer
@@ -896,6 +900,7 @@ async def run(config: SwitchConfig) -> None:
     collab_lifecycle.register_adapter(
         "telegram", TelegramAdapter, TelegramConnectionConfig
     )
+    collab_lifecycle.register_adapter("zulip", ZulipAdapter, ZulipConnectionConfig)
 
     # Liveness, and cheap on purpose: the gateway Deployment and the setup Job
     # wait on it at boot, so anything it checked would become a boot-ordering

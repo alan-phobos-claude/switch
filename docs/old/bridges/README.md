@@ -1,7 +1,7 @@
 # Collaboration bridge setup
 
 A **collaboration bridge** is a two-way relay between an external chat platform
-(Slack, Mattermost, Microsoft Teams, Discord, Telegram) and Switch's internal Matrix
+(Slack, Mattermost, Microsoft Teams, Discord, Telegram, Zulip) and Switch's internal Matrix
 rooms. Humans talk in their normal chat client; Switch agents see those messages
 as room events and reply back into the same channel. Each external channel maps
 to a Switch room, and each Switch agent is presented in the channel under the
@@ -18,6 +18,7 @@ shared onboarding model, then the per-platform guide:
 | Microsoft Teams | [`TEAMS_SETUP.md`](TEAMS_SETUP.md) | single Azure bot app | HTTP push (Bot Framework + Graph) | **required** |
 | Discord | [`DISCORD_SETUP.md`](DISCORD_SETUP.md) | single bot app | Gateway WebSocket (outbound) | not required |
 | Telegram | [`TELEGRAM_SETUP.md`](TELEGRAM_SETUP.md) | single bot, agent named in the message body | long polling (outbound) | not required |
+| Zulip | [`ZULIP_SETUP.md`](ZULIP_SETUP.md) | one bot account per agent | event queue long polling (outbound) | not required |
 
 Every guide above describes an app the operator registers themselves and
 supplies the credentials for. Slack additionally has a **distributed** app —
@@ -72,13 +73,13 @@ until one is set. Each guide says where its platform renders the display name.
 
 ### Registered bridge types
 
-`slack`, `mattermost`, `teams`, `discord`, `telegram`. The dashboard's registration
+`slack`, `mattermost`, `teams`, `discord`, `telegram`, `zulip`. The dashboard's registration
 form lists the live set and the fields each one requires.
 
 ## Once a bridge is live
 
 - **Rooms.** Depending on the platform, a Switch room is created for a channel
-  either when the bot is added to it (Slack, Mattermost, Teams, Telegram) or
+  either when the bot is added to it (Slack, Mattermost, Teams, Telegram, Zulip) or
   lazily on the first bridged message (Discord — it has no "app added to channel"
   signal). Teams is a partial case: an app is installed into a *team* rather
   than a channel, so the signal fires for the channel it is added to and the

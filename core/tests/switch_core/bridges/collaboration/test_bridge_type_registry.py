@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
@@ -16,6 +16,7 @@ from switch_core.bridges.collaboration.mattermost.adapter import (
     MattermostAdapter,
     MattermostConnectionConfig,
 )
+from switch_core.bridges.collaboration.models import BridgeStartRefused
 from switch_core.bridges.collaboration.slack.adapter import (
     SlackAdapter,
     SlackConnectionConfig,
@@ -28,7 +29,12 @@ from switch_core.bridges.collaboration.telegram.adapter import (
     TelegramAdapter,
     TelegramConnectionConfig,
 )
+from switch_core.bridges.collaboration.zulip.adapter import (
+    ZulipAdapter,
+    ZulipConnectionConfig,
+)
 from switch_core.keys import Keyring
+from switch_core.outbound import OutboundPolicy
 
 
 def _service() -> CollaborationBridgeLifecycleService:
@@ -100,6 +106,16 @@ def test_telegram_adapter_registers_with_expected_required_fields() -> None:
     # bridge hands out is built from it, with no API call to fall back on.
     assert set(schema["properties"]) == {"bot_token", "bot_username"}
     assert set(schema["required"]) == {"bot_token", "bot_username"}
+
+
+def test_zulip_adapter_registers_with_expected_required_fields() -> None:
+    service = _service()
+    service.register_adapter("zulip", ZulipAdapter, ZulipConnectionConfig)
+
+    assert service.get_registered_types() == ["zulip"]
+    schema = service.get_config_schema("zulip")
+    assert set(schema["required"]) == {"site", "email", "api_key"}
+    assert ZulipAdapter.supports_channel_creation is True
 
 
 def test_get_config_schema_exposes_required_fields() -> None:
@@ -242,3 +258,29 @@ def test_validate_connection_config_unknown_type_raises() -> None:
     service = _service()
     with pytest.raises(ValueError, match="Unknown bridge type"):
         service.validate_connection_config("does-not-exist", {})
+
+
+async def test_an_edit_naming_a_refused_url_never_has_its_credentials_sent() -> None:
+    """The credential check sends the secrets to the edited URL, so the
+    outbound policy has to refuse it first, as registration does."""
+    service = _service()
+    service._config.outbound_policy = OutboundPolicy.parse("")
+    service.register_adapter("zulip", ZulipAdapter, ZulipConnectionConfig)
+    verify = AsyncMock()
+
+    with (
+        patch.object(service, "reject_claim_conflict", AsyncMock()),
+        patch.object(ZulipAdapter, "verify_credentials", verify),
+        pytest.raises(BridgeStartRefused),
+    ):
+        await service.check_edited_connection_config(
+            bridge_id="b1",
+            bridge_type="zulip",
+            connection_config={
+                "site": "http://169.254.169.254",
+                "email": "bridge@example.test",
+                "api_key": "secret",
+            },
+        )
+
+    verify.assert_not_awaited()

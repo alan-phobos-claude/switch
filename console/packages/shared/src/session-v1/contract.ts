@@ -7,7 +7,8 @@ export type Surface =
   | 'mattermost'
   | 'discord'
   | 'teams'
-  | 'telegram';
+  | 'telegram'
+  | 'zulip';
 export type Provider = string;
 export type Origin = {
   surface: Surface;
