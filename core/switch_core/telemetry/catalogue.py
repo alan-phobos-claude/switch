@@ -198,6 +198,7 @@ _SNAPSHOT_COUNTS = (
     "connector_discord_count",
     "connector_teams_count",
     "connector_telegram_count",
+    "connector_zulip_count",
     "connector_configured_count",
     "message_count_1d",
     "message_from_human_1d",

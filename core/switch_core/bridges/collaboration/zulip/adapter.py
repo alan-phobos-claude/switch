@@ -36,6 +36,7 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import os
 import re
 import time
 import uuid
@@ -103,7 +104,7 @@ from switch_core.bridges.collaboration.zulip.controls import (
     stop_hint,
     turn_actions,
 )
-from switch_core.outbound import guarded_async_client
+from switch_core.outbound import OutboundPolicy, guarded_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -126,22 +127,26 @@ _EMAIL_MENTION = re.compile(r"@([\w.+-]+@[\w-]+(?:\.[\w-]+)+)")
 # An agent named in plain text, the way Switch itself writes `@agent-name`.
 _PLAIN_MENTION = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9._-]*)")
 
+# A Switch transport id in an outbound body (`@alice:server`). Not part of a
+# longer address: `git@host:org/repo` and `ssh://git@host:22/x` are left whole.
+_TRANSPORT_MENTION = re.compile(r"(?<![\w.])@([\w.-]+):[\w.-]+(?![\w./:-])")
+
 # Separates a message id from the edit it stands for in a message reference:
 # an edit relayed into the room is a message of its own, so it needs a
 # reference of its own, and that reference still has to lead back to the
 # Zulip message for a reaction, a reply or a thread to land on.
 _EDIT_SEPARATOR = "~"
 
-# A Switch transport id in an outbound body (`@alice:server`).
-_TRANSPORT_MENTION = re.compile(r"@([\w.-]+):\S+")
-
 # A file in a message, as Zulip writes one into the raw Markdown it stores.
 _UPLOAD_LINK = re.compile(r"\[([^\]\n]*)\]\((/user_uploads/[^)\s]+)\)")
 
 _SHORT_NAME_INVALID = re.compile(r"[^a-z0-9_-]")
 
-# How long the poller waits before re-registering after the server dropped a
-# queue or a poll failed; doubled per consecutive failure up to the ceiling.
+# The longest topic name Zulip takes.
+_MAX_TOPIC_LENGTH = 60
+
+# How long the poller waits before asking again after a failed poll or a failed
+# registration; doubled per consecutive failure up to the ceiling.
 _RETRY_INITIAL_SECONDS = 2.0
 _RETRY_MAX_SECONDS = 30.0
 
@@ -209,8 +214,10 @@ class ZulipConnectionConfig(BridgeConnectionConfig):
         value = value.strip()
         if not value:
             raise ValueError("default_topic must not be empty")
-        if len(value) > 60:
-            raise ValueError("default_topic must be at most 60 characters")
+        if len(value) > _MAX_TOPIC_LENGTH:
+            raise ValueError(
+                f"default_topic must be at most {_MAX_TOPIC_LENGTH} characters"
+            )
         return value
 
 
@@ -277,11 +284,16 @@ class ZulipAdapter(PlatformAdapter):
 
     @classmethod
     def claimed_workspace(cls, connection_config: dict[str, object]) -> str | None:
+        """The organization, written the same however its URL was: letter
+        case, the scheme and a port that is the scheme's own default do not
+        make one organization look like two, which would let two bridges
+        relay it twice."""
         parts = urlsplit(_site(str(connection_config["site"])))
         host = (parts.hostname or "").lower()
-        if parts.port is not None:
+        default_port = {"http": 80, "https": 443}.get(parts.scheme.lower())
+        if parts.port is not None and parts.port != default_port:
             host = f"{host}:{parts.port}"
-        return f"Zulip organization {parts.scheme.lower()}://{host}{parts.path}"
+        return f"Zulip organization {host}{parts.path.rstrip('/').lower()}"
 
     @classmethod
     def outbound_urls(cls, connection_config: dict[str, object]) -> list[str]:
@@ -290,8 +302,15 @@ class ZulipAdapter(PlatformAdapter):
     @classmethod
     async def verify_credentials(cls, connection_config: dict[str, object]) -> None:
         config = ZulipConnectionConfig.model_validate(connection_config)
-        async with httpx.AsyncClient(
-            base_url=config.site, verify=config.verify_tls
+        # The credentials go to whatever `site` names, so the connection is
+        # held to the outbound policy as it is made, not only when the URL was
+        # checked: a name can resolve somewhere else by then. Built from the
+        # setting the server's config reads, which comes from the environment.
+        policy = OutboundPolicy.parse(
+            os.environ.get("OUTBOUND_ALLOWED_PRIVATE_HOSTS", "")
+        )
+        async with guarded_async_client(
+            policy, verify=config.verify_tls, base_url=config.site
         ) as http:
             client = ZulipClient(http, email=config.email, api_key=config.api_key)
             try:
@@ -1164,7 +1183,7 @@ class ZulipAdapter(PlatformAdapter):
                 ),
                 _CACHE_MAX,
             )
-        elif seeded and rendered.value:
+        elif seeded:
             # Removal failed part-way: keep the record so the next redraw
             # tries again, but with nothing a click could press.
             _remember(
@@ -1173,7 +1192,7 @@ class ZulipAdapter(PlatformAdapter):
                 Offer(
                     channel_id=channel_id,
                     thread_ref=thread_ref,
-                    value=rendered.value,
+                    value="",
                     actions={},
                     seeded=seeded,
                 ),
@@ -1612,18 +1631,18 @@ class ZulipAdapter(PlatformAdapter):
             email = str(existing["username"])
             user_id = await self._user_id(email)
             api_key = str(existing["api_key"])
-            if existing.get("full_name") != label:
-                await bridge.call("PATCH", f"bots/{user_id}", {"full_name": label})
+            full_name = str(existing.get("full_name") or label)
+            if full_name != label:
+                full_name = await self._rename_bot(user_id, label, full_name)
         else:
             reactivated = await self._reactivate_bot(short_name)
             if reactivated is not None:
-                user_id, email, api_key = reactivated
-                await bridge.call("PATCH", f"bots/{user_id}", {"full_name": label})
+                user_id, email, api_key, full_name = reactivated
+                if full_name != label:
+                    full_name = await self._rename_bot(user_id, label, full_name)
             else:
-                created = await bridge.call(
-                    "POST",
-                    "bots",
-                    {"full_name": label, "short_name": short_name, "bot_type": 1},
+                created, full_name = await self._create_bot(
+                    agent_name, label, short_name
                 )
                 user_id = int(created["user_id"])
                 api_key = str(created["api_key"])
@@ -1639,13 +1658,13 @@ class ZulipAdapter(PlatformAdapter):
         bot = _AgentBot(
             agent_name=agent_name,
             user_id=user_id,
-            full_name=label,
+            full_name=full_name,
             client=ZulipClient(http, email=email, api_key=api_key),
         )
         self._bots[agent_name] = bot
         self._bot_by_user_id[user_id] = bot
         self._realm_bot_ids.add(user_id)
-        self._remember_person(user_id, email, label)
+        self._remember_person(user_id, email, full_name)
         bot.poller = asyncio.create_task(
             self._poll(
                 f"bot:{agent_name}",
@@ -1661,13 +1680,65 @@ class ZulipAdapter(PlatformAdapter):
         self._spawn(self._set_avatar(bot), f"zulip-avatar-{agent_name}")
         logger.info("Zulip bot identity ready for agent %s (%s)", agent_name, email)
 
-    async def _reactivate_bot(self, short_name: str) -> tuple[int, str, str] | None:
+    async def _create_bot(
+        self, agent_name: str, label: str, short_name: str
+    ) -> tuple[dict[str, Any], str]:
+        """Create the agent's bot, under its label where Zulip allows it.
+
+        Zulip refuses a name an active account already has, so where the
+        label is taken the agent's identifier is added to it.
+        """
+        bridge = self._require_bridge()
+        names = _bot_names(agent_name, label)
+        for index, full_name in enumerate(names):
+            try:
+                created = await bridge.call(
+                    "POST",
+                    "bots",
+                    {"full_name": full_name, "short_name": short_name, "bot_type": 1},
+                )
+            except ZulipError as exc:
+                if _name_taken(exc) and index + 1 < len(names):
+                    continue
+                raise
+            return created, full_name
+        raise AssertionError("unreachable: the last name either returns or raises")
+
+    async def _rename_bot(self, user_id: int, label: str, current: str) -> str:
+        """Give an adopted bot its agent's current label, or keep the name it
+        has where Zulip will not take the label. Returns the name it has."""
+        bot_names = (
+            _bot_names(self._bot_by_user_id[user_id].agent_name, label)
+            if user_id in self._bot_by_user_id
+            else [label]
+        )
+        for full_name in bot_names:
+            if full_name == current:
+                return current
+            try:
+                await self._require_bridge().call(
+                    "PATCH", f"bots/{user_id}", {"full_name": full_name}
+                )
+            except ZulipError as exc:
+                if _name_taken(exc):
+                    continue
+                logger.warning("Could not rename Zulip bot %s: %s", user_id, exc)
+                return current
+            return full_name
+        logger.warning(
+            "Zulip bot %s keeps the name %r: %r is taken", user_id, current, label
+        )
+        return current
+
+    async def _reactivate_bot(
+        self, short_name: str
+    ) -> tuple[int, str, str, str] | None:
         """Bring back a bot of this bridge's that removing it deactivated.
 
         `GET /bots` lists only active bots, and Zulip keeps a deactivated bot's
         name, so without this a bridge registered again could create none of
-        its agents' bots. Returns the bot's user id, email and API key, or None
-        where there is no such bot.
+        its agents' bots. Returns the bot's user id, email, API key and name,
+        or None where there is no such bot.
         """
         bridge = self._require_bridge()
         members = await bridge.call("GET", "users")
@@ -1685,12 +1756,13 @@ class ZulipAdapter(PlatformAdapter):
         if found is None:
             return None
         user_id = int(found["user_id"])
+        full_name = str(found.get("full_name", ""))
         await bridge.call("POST", f"users/{user_id}/reactivate")
         owned = await bridge.call("GET", "bots")
         for bot in owned.get("bots", []):
             if str(bot.get("username", "")) == str(found["email"]):
                 logger.info("Reactivated Zulip bot %s", found["email"])
-                return user_id, str(found["email"]), str(bot["api_key"])
+                return user_id, str(found["email"]), str(bot["api_key"]), full_name
         raise RuntimeError(
             f"Reactivated Zulip bot {found['email']} but it is not among the "
             "bridge account's bots"
@@ -1808,17 +1880,18 @@ class ZulipAdapter(PlatformAdapter):
         """Rewrite a mention of an agent's bot to the `@agent` Switch routes on."""
 
         def mention(match: re.Match[str]) -> str:
-            name, user_id = match.group(1), match.group(2)
-            bot: _AgentBot | None = None
-            if user_id is not None:
-                bot = self._bot_by_user_id.get(int(user_id))
-            else:
-                bot = next(
-                    (b for b in self._bots.values() if b.full_name == name), None
-                )
+            bot = self._mentioned_bot(match)
             return f"@{bot.agent_name}" if bot is not None else match.group(0)
 
         return _USER_MENTION.sub(mention, raw_message)
+
+    def _mentioned_bot(self, match: re.Match[str]) -> _AgentBot | None:
+        """The agent's bot a Zulip mention names: by id where it carries one,
+        which is what Zulip writes when two accounts share a name."""
+        name, user_id = match.group(1), match.group(2)
+        if user_id is not None:
+            return self._bot_by_user_id.get(int(user_id))
+        return next((b for b in self._bots.values() if b.full_name == name), None)
 
     # ── Events ───────────────────────────────────────────────────────────────
 
@@ -1928,6 +2001,11 @@ class ZulipAdapter(PlatformAdapter):
         """
         if event.get("rendering_only") or "content" not in event:
             return
+        if agent is not None and event.get("stream_id") is not None:
+            # A bot's queue is narrowed to its direct messages, but Zulip
+            # narrows message events only: an edit in a stream reaches every
+            # subscribed bot too. The bridge's queue is the one for streams.
+            return
         if "orig_content" not in event:
             return
         newly_named = self._agents_named(str(event["content"])) - self._agents_named(
@@ -1961,12 +2039,7 @@ class ZulipAdapter(PlatformAdapter):
         """The agents a message names, as Zulip mentions or as `@agent-name`."""
         named: set[str] = set()
         for match in _USER_MENTION.finditer(text):
-            name, user_id = match.group(1), match.group(2)
-            bot = (
-                self._bot_by_user_id.get(int(user_id))
-                if user_id is not None
-                else next((b for b in self._bots.values() if b.full_name == name), None)
-            )
+            bot = self._mentioned_bot(match)
             if bot is not None:
                 named.add(bot.agent_name)
         for match in _PLAIN_MENTION.finditer(text):
@@ -1985,6 +2058,9 @@ class ZulipAdapter(PlatformAdapter):
         if sender_id == self._bridge_user_id or sender_id in self._bot_by_user_id:
             return
         if message.get("sender_realm_str") == _SYSTEM_BOT_REALM:
+            return
+        if message.get("type") == "stream" and agent is not None:
+            # Stream traffic is the bridge queue's; see `_handle_edit`.
             return
         if message.get("type") != "stream" and agent is None:
             # A direct message as the bridge account sees it. Either it is to
@@ -2027,7 +2103,17 @@ class ZulipAdapter(PlatformAdapter):
             channel_id = _DM_PREFIX + ",".join(str(i) for i in user_ids)
             channel_type = "direct" if len(user_ids) <= 2 else "group"
 
-        agent_name = agent.agent_name if agent is not None else None
+        # The agent a direct message is to, where there is exactly one. In a
+        # group with several agents, whichever bot's queue delivered it first
+        # says nothing about who it is for, so none is named.
+        agents_in = (
+            [uid for uid in user_ids if uid in self._bot_by_user_id]
+            if message.get("type") != "stream"
+            else []
+        )
+        agent_name = (
+            agent.agent_name if agent is not None and len(agents_in) == 1 else None
+        )
         stripped = content.strip()
         # An edit is never run as a command: a command is something done once.
         if edit is None and stripped.startswith("!"):
@@ -2181,17 +2267,61 @@ class ZulipAdapter(PlatformAdapter):
                         )
                     )
                     continue
-                user = await self._require_bridge().call("GET", f"users/{user_id}")
-                if user["user"].get("is_bot"):
+                if user_id in self._realm_bot_ids:
+                    continue
+                # One person who cannot be read must not cost the others
+                # their join.
+                try:
+                    email = await self._joined_email(user_id)
+                except (ZulipError, httpx.HTTPError) as exc:
+                    logger.warning(
+                        "Could not read Zulip user %s added to stream %s: %s",
+                        user_id,
+                        channel_id,
+                        exc,
+                    )
+                    continue
+                if email is None:
                     continue
                 await _started(self._on_user_joined)(
                     InboundUserJoin(
                         channel_id=channel_id,
                         channel_type=channel_type,
                         external_user_id=str(user_id),
-                        external_username=str(user["user"]["email"]),
+                        external_username=email,
                     )
                 )
+
+    async def _joined_email(self, user_id: int) -> str | None:
+        """A person's email, or None for a bot, from what is already known
+        where it can be."""
+        known = self._emails.get(user_id)
+        if known is not None:
+            return known
+        user = (await self._require_bridge().call("GET", f"users/{user_id}"))["user"]
+        if user.get("is_bot"):
+            self._realm_bot_ids.add(user_id)
+            return None
+        self._remember_person(
+            user_id, str(user["email"]), str(user.get("full_name", ""))
+        )
+        return str(user["email"])
+
+
+def _bot_names(agent_name: str, label: str) -> list[str]:
+    """The names to try for an agent's bot, in order: its label, then the label
+    with its identifier, which no other agent shares."""
+    names = [label]
+    if label != agent_name:
+        names.append(f"{label} ({agent_name})")
+    names.append(f"{label} (Switch {agent_name})")
+    return names
+
+
+def _name_taken(exc: ZulipError) -> bool:
+    """Whether Zulip refused a name because an active account has it. Zulip
+    gives this refusal no code of its own, so it is read from the message."""
+    return "already in use" in str(exc).lower()
 
 
 def _edit_window_closed(exc: ZulipError) -> bool:

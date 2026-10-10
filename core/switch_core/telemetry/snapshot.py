@@ -71,7 +71,7 @@ AGENT_CLIENT_TYPE = "agent"
 # The platforms reported individually. Fixed rather than derived from what is
 # configured, so a deployment with no Discord bridge reports zero rather than
 # omitting the property — the catalogue requires every key every time.
-PLATFORMS = ("slack", "mattermost", "discord", "teams", "telegram")
+PLATFORMS = ("slack", "mattermost", "discord", "teams", "telegram", "zulip")
 
 # What a participant said, as opposed to everything else the transport stores in
 # the same table: arrivals, tool and LLM call reports, task transitions. A
